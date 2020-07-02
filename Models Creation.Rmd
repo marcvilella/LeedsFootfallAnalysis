@@ -1,0 +1,250 @@
+---
+title: "Leeds Footfall"
+author: "Marc Vilella"
+date: "26/04/2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Introduction
+
+Introduction...
+
+```{r libraries, warning = FALSE, message = FALSE}
+library(tidyverse)
+#library(readxl)
+library(xlsx)
+library(ggplot2)
+library(caret)
+library(knitr)
+require(gridExtra)
+library(dplyr)
+library(ggpubr)
+library(caret)
+library(glmnet)
+library(randomForest)
+library(reshape2)
+library(ranger)
+```
+
+Read excel file, normalize column names and filter by Weather data
+
+```{r cameras}
+# Read and Save
+setwd("C:\\Users\\marcv\\Google Drive\\Escola\\Master\\Semester 2\\Learning Skills through Case Studies\\Assignment 4")
+cameras = read_xlsx("cameras_data_weather_model.xlsx", sheet = 1, guess_max = 20000)
+#saveRDS(cameras, file = "cameras.RDS") 
+#cameras = readRDS('cameras.RDS')
+
+cameras %>% filter(WeekDay != weekdays(Date))
+cameras %>% filter(WeekNum != lubridate::isoweek(Date)) # Hasta 2009-01-04, se usa BCE
+cameras %>% filter(Month != months(Date))
+
+# Fix
+cameras$WeekDay = weekdays(cameras$Date)
+cameras$WeekNum = lubridate::isoweek(cameras$Date)
+cameras$Month = months(cameras$Date)
+
+# Normalize
+names(cameras) = snakecase::to_snake_case(names(cameras))
+cols = c("location_name", "hour", "week_day", "month")
+cameras[cols] <- lapply(cameras[cols], as.factor)
+cameras$location_name <- factor(cameras$location_name, levels = c("Briggate", "Briggate at McDonalds", "Headrow", "Dortmund Square", "Albion Street North", "Albion Street South", "Commercial Street at Lush", "Commercial Street at Barratts"))
+cameras$hour <- factor(cameras$hour, levels = c("00:00", "01:00", "02:00", "03:00", "04:00", "05:00", "06:00", "07:00", "08:00", "09:00", "10:00", "11:00", "12:00", "13:00", "14:00", "15:00", "16:00", "17:00", "18:00", "19:00", "20:00", "21:00", "22:00", "23:00"))
+cameras$week_day <- factor(cameras$week_day, levels = c("Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"))
+cameras$month <- factor(cameras$month, levels = c("January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"))
+
+# Filter
+cameras_filtered = na.omit(cameras) %>% filter(date >= as.Date("2009-01-01") & date <= as.Date("2013-12-31"))
+cameras_2014_filtered = na.omit(cameras) %>% filter(date >= as.Date("2014-01-01"))
+
+fixtures = readxl::read_xlsx("Fixtures.xlsx", sheet = 1, guess_max = 20000)
+cameras_filtered = cameras_filtered %>% mutate(gameday = as.Date(as.POSIXct(date, 'GMT')) %in% as.Date(as.POSIXct(fixtures$Date, 'GMT')))
+cameras_2014_filtered = cameras_2014_filtered %>% mutate(gameday = as.Date(as.POSIXct(date, 'GMT')) %in% as.Date(as.POSIXct(fixtures$Date, 'GMT')))
+
+```
+
+Create training/test data
+
+```{r}
+# Create ids for training and select data
+train_idx = sample(dim(cameras_filtered)[1], round(nrow(cameras_filtered)*0.80))
+data.train = cameras_filtered[train_idx, ]
+data.test = cameras_filtered[-train_idx, ]
+
+# Formulas
+formula_regression = "count ~ poly(temperature, 2) + poly(wind, 2) + poly(precipitation, 2) + poly(humidity, 2) + poly(cloud_cover, 2) + poly(location_name, 2) + poly(hour, 2) + poly(week_day, 2) + poly(month, 2) + poly(year, 2)"
+
+formula_forest = "count ~ temperature + wind + precipitation + humidity + cloud_cover + location_name + hour + week_day + month"
+```
+
+Set general parameters
+```{r}
+# Options
+set.seed(100)
+options(warn=-1)
+
+# Parameters
+repetitions = 1
+
+predictions_train = data.frame(count = data.train$count)
+predictions_test = data.frame(count = data.test$count)
+predictions_2014 = data.frame(count = cameras_2014_filtered$count)
+
+metrics <- data.frame(
+  Model = vector(length = 7),
+  RMSE = vector(length = 7),
+  RSquare = vector(length = 7)
+)
+
+metrics_2014 <- data.frame(
+  Model = vector(length = 7),
+  RMSE = vector(length = 7),
+  RSquare = vector(length = 7)
+)
+```
+
+## Polynomial Regression
+
+```{r}
+# Train
+formula_regression = "count ~ poly(temperature, 2) + poly(wind, 2) + poly(precipitation, 2) + poly(humidity, 2) + poly(cloud_cover, 2) + location_name + hour + week_day + month + poly(year, 2)"
+model_polynomial <- lm(formula(formula_regression), data = data.train)
+
+# Saving results
+predictions_train$Polynomial = predict(model_polynomial, data.train)
+predictions_test$Polynomial = predict(model_polynomial, data.test)
+predictions_2014$Polynomial = predict(model_polynomial, cameras_2014_filtered)
+
+metrics$Model[1] = "Polynomial"
+metrics$RMSE[1] = RMSE(predictions_test$Polynomial, predictions_test$count)
+metrics$RSquare[1] = R2(predictions_test$Polynomial, predictions_test$count)
+metrics$Cor[1] = unname(cor.test(predictions_test$Polynomial, predictions_test$count)$estimate)
+metrics_2014$Model[1] = "Polynomial"
+metrics_2014$RMSE[1] = RMSE(predictions_2014$Polynomial, predictions_2014$count)
+metrics_2014$RSquare[1] = R2(predictions_2014$Polynomial, predictions_2014$count)
+metrics_2014$Cor[1] = unname(cor.test(predictions_2014$Polynomial, predictions_2014$count)$estimate)
+
+
+formula_regression = "count ~ location_name + hour + week_day + month + poly(year, 2)"
+model_polynomial_2 <- lm(formula(formula_regression), data = data.train)
+predictions_train$Polynomial_2 = predict(model_polynomial_2, data.train)
+predictions_test$Polynomial_2 = predict(model_polynomial_2, data.test)
+predictions_2014$Polynomial_2 = predict(model_polynomial_2, cameras_2014_filtered)
+metrics$Model[2] = "Polynomial_2"
+metrics$RMSE[2] = RMSE(predictions_test$Polynomial_2, predictions_test$count)
+metrics$RSquare[2] = R2(predictions_test$Polynomial_2, predictions_test$count)
+metrics$Cor[2] = unname(cor.test(predictions_test$Polynomial_2, predictions_test$count)$estimate)
+metrics_2014$Model[2] = "Polynomial_2"
+metrics_2014$RMSE[2] = RMSE(predictions_2014$Polynomial_2, predictions_2014$count)
+metrics_2014$RSquare[2] = R2(predictions_2014$Polynomial_2, predictions_2014$count)
+metrics_2014$Cor[2] = unname(cor.test(predictions_2014$Polynomial_2, predictions_2014$count)$estimate)
+```
+
+## Random forest
+
+```{r}
+formula_forest = "count ~ location_name + hour + week_day + month + year"
+
+model_forest = ranger(formula(formula_forest), data=data.train)
+summary(model_forest)
+varImp(model_forest) 
+
+predictions_train$RandomForest = predict(model_forest, data = data.train, type = "response")$predictions
+predictions_test$RandomForest = predict(model_forest, data = data.test, type = "response")$predictions
+
+# Saving results
+metrics$Model[5] = "Random Forest"
+metrics$RMSE[5] = RMSE(predictions_test$RandomForest, predictions_test$count)
+metrics$RSquare[5] = R2(predictions_test$RandomForest, predictions_test$count)
+```
+
+```{r}
+formula_forest = "count ~ location_name + hour + week_day + week_num + year"
+model_forest_2 = ranger(formula(formula_forest), data=data.train)
+predictions_train$RandomForest_2 = predict(model_forest_2, data = data.train, type = "response")$predictions
+predictions_test$RandomForest_2 = predict(model_forest_2, data = data.test, type = "response")$predictions
+predictions_2014$RandomForest_2 = predict(model_forest_2, data = cameras_2014_filtered, type = "response")$predictions
+metrics$Model[4] = "Random Forest 2"
+metrics$RMSE[4] = RMSE(predictions_test$RandomForest_2, predictions_test$count)
+metrics$RSquare[4] = R2(predictions_test$RandomForest_2, predictions_test$count)
+metrics$Cor[4] = unname(cor.test(predictions_test$RandomForest_2, predictions_test$count)$estimate)
+metrics_2014$Model[4] = "Random Forest 2"
+metrics_2014$RMSE[4] = RMSE(predictions_2014$RandomForest_2, predictions_2014$count)
+metrics_2014$RSquare[4] = R2(predictions_2014$RandomForest_2, predictions_2014$count)
+metrics_2014$Cor[4] = unname(cor.test(predictions_2014$RandomForest_2, predictions_2014$count)$estimate)
+remove(model_forest_2)
+
+formula_forest = "count ~ location_name + hour + week_day + week_num + year + temperature + precipitation + humidity + cloud_cover"
+model_forest_3 = ranger(formula(formula_forest), data=data.train)
+model_forest_3$variable.importance / max(model_forest_3$variable.importance)
+predictions_train$RandomForest_3 = predict(model_forest_3, data = data.train, type = "response")$predictions
+predictions_test$RandomForest_3 = predict(model_forest_3, data = data.test, type = "response")$predictions
+predictions_2014$RandomForest_3 = predict(model_forest_3, data = cameras_2014_filtered, type = "response")$predictions
+metrics$Model[5] = "Random Forest 3"
+metrics$RMSE[5] = RMSE(predictions_test$RandomForest_3, predictions_test$count)
+metrics$RSquare[5] = R2(predictions_test$RandomForest_3, predictions_test$count)
+metrics$Cor[5] = unname(cor.test(predictions_test$RandomForest_3, predictions_test$count)$estimate)
+metrics_2014$Model[5] = "Random Forest 3"
+metrics_2014$RMSE[5] = RMSE(predictions_2014$RandomForest_3, predictions_2014$count)
+metrics_2014$RSquare[5] = R2(predictions_2014$RandomForest_3, predictions_2014$count)
+metrics_2014$Cor[5] = unname(cor.test(predictions_2014$RandomForest_3, predictions_2014$count)$estimate)
+remove(model_forest_3)
+
+formula_forest = "count ~ location_name + hour + week_day + week_num + year + temperature + wind + precipitation + humidity + cloud_cover"
+model_forest_4 = ranger(formula(formula_forest), data=data.train)
+predictions_train$RandomForest_4 = predict(model_forest_4, data = data.train, type = "response")$predictions
+predictions_test$RandomForest_4 = predict(model_forest_4, data = data.test, type = "response")$predictions
+predictions_2014$RandomForest_4 = predict(model_forest_4, data = cameras_2014_filtered, type = "response")$predictions
+metrics$Model[6] = "Random Forest 4"
+metrics$RMSE[6] = RMSE(predictions_test$RandomForest_4, predictions_test$count)
+metrics$RSquare[6] = R2(predictions_test$RandomForest_4, predictions_test$count)
+metrics$Cor[6] = unname(cor.test(predictions_test$RandomForest_4, predictions_test$count)$estimate)
+metrics_2014$Model[6] = "Random Forest 4"
+metrics_2014$RMSE[6] = RMSE(predictions_2014$RandomForest_4, predictions_2014$count)
+metrics_2014$RSquare[6] = R2(predictions_2014$RandomForest_4, predictions_2014$count)
+metrics_2014$Cor[6] = unname(cor.test(predictions_2014$RandomForest_4, predictions_2014$count)$estimate)
+remove(model_forest_4)
+
+print(metrics)
+print(metrics_2014)
+```
+
+```{r}
+saveRDS(predictions_train, file = "predictions_train.RDS") 
+saveRDS(predictions_test, file = "predictions_test.RDS") 
+saveRDS(metrics, file = "metrics.RDS") 
+
+library(ggpubr)
+test_results = data.test
+test_results$count_polynomial = predictions_test$Polynomial
+test_results$count_rf = predictions_test$RandomForest
+cor.test(test_results$count, test_results$count_polynomial, method=c("pearson", "kendall", "spearman"))
+cor.test(test_results$count, test_results$count_rf, method=c("pearson", "kendall", "spearman"))
+predictions_test$date = data.test$date
+predictions_test$location_name = data.test$location_name
+write.csv(predictions_test, "test_results.csv") 
+
+train_results = data.train
+train_results$count_polynomial =predictions_train$Polynomial
+train_results$count_rf = predictions_train$RandomForest
+cor.test(train_results$count, train_results$count_polynomial, method=c("pearson", "kendall", "spearman"))
+cor.test(train_results$count, train_results$count_rf, method=c("pearson", "kendall", "spearman"))
+predictions_train$date = data.train$date
+predictions_train$location_name = data.train$location_name
+write.csv(predictions_train, "train_results.csv") 
+```
+
+# Correlations
+
+```{r}
+library(corrplot)
+cameras_by_date = readxl::read_xlsx("cameras_data_Tableau.xlsx", sheet = 1, guess_max = 20000)
+cameras_by_date_filtered = cameras_by_date[,c(4, 5, 9, 8, 2 ,3 , 7, 6)]  %>% na.omit()
+names(cameras_by_date_filtered) = c("Briggate", "Briggate at McDonalds", "Headrow", "Dortmund Square", "Albion St. North", "Albion St. South", "Commercial St. at Lush", "Commercial St. at Barratts")
+cor_matrix = cor(cameras_by_date_filtered)
+corrplot(cor_matrix, method = "color", type = "upper", order = "original", tl.col = "black", tl.srt = 45, tl.cex = 0.75, addCoef.col = "White")
+```
